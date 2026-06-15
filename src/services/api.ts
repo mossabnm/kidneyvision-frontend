@@ -2,7 +2,7 @@ import axios from "axios";
 import { KidneyAnalysis, DashboardStats, User, DiagnosisResult } from "../types";
 
 // Grab remote API URL. Configured via .env.local or platform secrets.
-const DEFAULT_API_URL = `http://localhost:8000/api`;
+const DEFAULT_API_URL = `https://kidneyvision-backend-production.up.railway.app/api`;
 export const API_URL = ((import.meta as any).env?.VITE_API_URL) || DEFAULT_API_URL;
 const BASE_URL = API_URL.replace('/api', '');
 
