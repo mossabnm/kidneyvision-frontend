@@ -21,6 +21,8 @@ const AppSettings = React.lazy(() => import("./components/AppSettings"));
 const GuestAnalysis = React.lazy(() => import("./components/GuestAnalysis"));
 const ForgotPassword = React.lazy(() => import("./components/ForgotPassword"));
 const ResetPassword = React.lazy(() => import("./components/ResetPassword"));
+const PrivacyPage = React.lazy(() => import("./components/PrivacyPage"));
+const TermsPage = React.lazy(() => import("./components/TermsPage"));
 
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
@@ -184,12 +186,14 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           {/* Public Routes */}
-          <Route path="/" element={<LandingPage onNavigateToAuth={() => window.location.href = "/login"} onEnterPortalDirectly={() => window.location.href = "/guest"} />} />
+          <Route path="/" element={<LandingPage onNavigateToAuth={() => window.location.href = "/login"} onEnterPortalDirectly={() => window.location.href = "/guest"} onNavigateToInfo={(page) => window.location.href = `/${page}`} />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/forgot-password" element={<Suspense fallback={<LoadingSkeleton />}><ForgotPassword /></Suspense>} />
           <Route path="/reset-password" element={<Suspense fallback={<LoadingSkeleton />}><ResetPassword /></Suspense>} />
           <Route path="/guest" element={<GuestAnalysis />} />
+          <Route path="/privacy" element={<Suspense fallback={<LoadingSkeleton />}><PrivacyPage /></Suspense>} />
+          <Route path="/terms" element={<Suspense fallback={<LoadingSkeleton />}><TermsPage /></Suspense>} />
 
           {/* Protected Routes rendered inside PortalLayout */}
           <Route 
