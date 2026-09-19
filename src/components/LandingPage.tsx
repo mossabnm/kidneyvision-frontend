@@ -61,9 +61,9 @@ const workflowSteps: Array<{ number: string; icon: LucideIcon; title: string; te
 ];
 
 const creators = [
-  ["Creator 01", "Full Stack Developer"],
-  ["Creator 02", "Machine Learning Engineer"],
-  ["Creator 03", "UI/UX Designer"],
+  ["Marouan Sellami", "Full Stack Developer"],
+  ["Souhibe Bakkali", "Machine Learning Engineer"],
+  ["Mossab Oueld Neimia", "UI/UX Designer"],
 ];
 
 function MedicalKidneyVisual({ className = "", imageClassName = "" }: { className?: string; imageClassName?: string }) {

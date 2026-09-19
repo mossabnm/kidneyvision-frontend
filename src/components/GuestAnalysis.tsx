@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { UploadCloud, CheckCircle2, ArrowLeft, Loader2, RefreshCw, AlertCircle } from "lucide-react";
 import { guestPredict } from "../services/api";
+import { validateScanFile } from "../utils/fileValidation";
 
 export default function GuestAnalysis() {
   const [file, setFile] = useState<File | null>(null);
@@ -22,10 +23,33 @@ export default function GuestAnalysis() {
     };
   }, [file]);
 
+  const handleFileSelect = async (selectedFile: File | null) => {
+    setError("");
+    if (!selectedFile) {
+      setFile(null);
+      return;
+    }
+
+    const validation = await validateScanFile(selectedFile);
+    if (!validation.valid) {
+      setError(validation.error || "Invalid file format.");
+      setFile(null);
+      return;
+    }
+
+    setFile(selectedFile);
+  };
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) {
-      setError("Please select an ultrasound image to analyze.");
+      setError("Please select an ultrasound scan image to analyze.");
+      return;
+    }
+
+    const validation = await validateScanFile(file);
+    if (!validation.valid) {
+      setError(validation.error || "Invalid file format.");
       return;
     }
 
@@ -63,10 +87,10 @@ export default function GuestAnalysis() {
               >
                 <input 
                   type="file" 
-                  accept="image/*" 
+                  accept=".jpg,.jpeg,.png,image/jpeg,image/png" 
                   onChange={(e) => {
                     const selectedFile = e.target.files?.[0] || null;
-                    setFile(selectedFile);
+                    handleFileSelect(selectedFile);
                   }}
                   className="hidden" 
                   id="guest-upload"

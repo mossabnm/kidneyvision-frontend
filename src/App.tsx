@@ -12,6 +12,7 @@ import ProtectedRoute from "./components/auth/ProtectedRoute";
 
 import React, { Suspense } from "react";
 import LoadingSkeleton from "./components/common/LoadingSkeleton";
+import ErrorBoundary from "./components/common/ErrorBoundary";
 
 const AppDashboard = React.lazy(() => import("./components/AppDashboard"));
 const AppNewAnalysis = React.lazy(() => import("./components/AppNewAnalysis"));
@@ -165,16 +166,18 @@ function PortalLayout() {
       </aside>
 
       <main className="flex-1 p-6 md:p-10 lg:p-12 overflow-y-auto max-w-7xl mx-auto w-full">
-        <Suspense fallback={<LoadingSkeleton />}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<AppDashboard />} />
-            <Route path="/analysis" element={<AppNewAnalysis onAddSuccess={() => window.location.href = "/history"} />} />
-            <Route path="/history" element={<AppHistory />} />
-            <Route path="/reports" element={<AppReports />} />
-            <Route path="/settings" element={<AppSettings />} />
-          </Routes>
-        </Suspense>
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingSkeleton />}>
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<AppDashboard />} />
+              <Route path="/analysis" element={<AppNewAnalysis onAddSuccess={() => window.location.href = "/history"} />} />
+              <Route path="/history" element={<AppHistory />} />
+              <Route path="/reports" element={<AppReports />} />
+              <Route path="/settings" element={<AppSettings />} />
+            </Routes>
+          </Suspense>
+        </ErrorBoundary>
       </main>
     </div>
   );
