@@ -4,12 +4,15 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { 
   Search, Calendar, Filter, Eye, Trash2, Sliders, X, 
-  ChevronRight, ChevronLeft, Loader2, Award, ClipboardCheck, ArrowUpRight, CheckCircle2, AlertCircle, RefreshCw
+  ChevronRight, ChevronLeft, Loader2, Award, ClipboardCheck, ArrowUpRight, CheckCircle2, AlertCircle, RefreshCw,
+  FileText, Download, FileDown, Sparkles, ZoomIn, ExternalLink
 } from "lucide-react";
-import { getAnalyses, deleteAnalysis, downloadReport } from "../services/api";
+import { getAnalyses, deleteAnalysis, downloadReport, updateAnalysis, getReportPdfBlobUrl } from "../services/api";
 import { KidneyAnalysis, DiagnosisResult } from "../types";
+import { parseClinicalError, ClinicalError } from "../utils/errorParser";
 import LoadingSkeleton from "./common/LoadingSkeleton";
 
 export default function AppHistory() {
@@ -18,12 +21,79 @@ export default function AppHistory() {
   const [searchId, setSearchId] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("All Results");
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const [dateFilter, setDateFilter] = useState<"All Time" | "Last 7 Days" | "Last 30 Days" | "Last 90 Days">("All Time");
+  const [showDateDropdown, setShowDateDropdown] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [meta, setMeta] = useState({ current_page: 1, last_page: 1, total: 0 });
   
   const [selectedAnalysis, setSelectedAnalysis] = useState<KidneyAnalysis | null>(null);
-  const [gradCamOverlay, setGradCamOverlay] = useState(true);
   const [submittingNote, setSubmittingNote] = useState(false);
+  const [editingNoteText, setEditingNoteText] = useState("");
+  const [isEditingNote, setIsEditingNote] = useState(false);
+  const [noteSavedFeedback, setNoteSavedFeedback] = useState(false);
+
+  // Notification Banner state
+  const [notification, setNotification] = useState<{ type: 'error' | 'success' | 'info'; title: string; message: string; suggestion?: string } | null>(null);
+
+  // PDF Preview and Download states
+  const [previewPdfUrl, setPreviewPdfUrl] = useState<string | null>(null);
+  const [previewPdfTitle, setPreviewPdfTitle] = useState<string>("");
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
+  const [downloadLoadingId, setDownloadLoadingId] = useState<string | null>(null);
+
+  // Enlarged Image Modal state
+  const [enlargedImageUrl, setEnlargedImageUrl] = useState<string | null>(null);
+  const [enlargedImageTitle, setEnlargedImageTitle] = useState<string>("");
+
+  const handlePreviewPdf = async (item: KidneyAnalysis, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setPreviewLoadingId(item.id);
+    try {
+      const url = await getReportPdfBlobUrl(item.id);
+      setPreviewPdfTitle(`Diagnostic Report — ${item.patientName || item.patientId} (#${item.id})`);
+      setPreviewPdfUrl(url);
+    } catch (err: any) {
+      const parsed = parseClinicalError(err);
+      setNotification({
+        type: 'error',
+        title: parsed.title,
+        message: parsed.message,
+        suggestion: parsed.suggestion
+      });
+    } finally {
+      setPreviewLoadingId(null);
+    }
+  };
+
+  const handleDownloadPdf = async (item: KidneyAnalysis, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setDownloadLoadingId(item.id);
+    try {
+      await downloadReport(item.id);
+      setNotification({
+        type: 'success',
+        title: 'Report Downloaded',
+        message: `Diagnostic PDF report for study #${item.id} downloaded successfully.`
+      });
+    } catch (err: any) {
+      const parsed = parseClinicalError(err);
+      setNotification({
+        type: 'error',
+        title: parsed.title,
+        message: parsed.message,
+        suggestion: parsed.suggestion
+      });
+    } finally {
+      setDownloadLoadingId(null);
+    }
+  };
+
+  const openDetails = (item: KidneyAnalysis) => {
+    setSelectedAnalysis(item);
+    setEditingNoteText(item.clinicianNotes || "");
+    setIsEditingNote(false);
+    setNoteSavedFeedback(false);
+  };
 
   async function loadAnalyses(page: number) {
     setLoading(true);
@@ -32,8 +102,14 @@ export default function AppHistory() {
       setAnalyses(response.data);
       setMeta(response.meta);
       setCurrentPage(response.meta.current_page);
-    } catch (e) {
-      console.error("Could not fetch clinical history", e);
+    } catch (e: any) {
+      const parsed = parseClinicalError(e);
+      setNotification({
+        type: 'error',
+        title: parsed.title,
+        message: parsed.message,
+        suggestion: parsed.suggestion
+      });
     } finally {
       setLoading(false);
     }
@@ -50,47 +126,79 @@ export default function AppHistory() {
       try {
         await deleteAnalysis(id);
         setAnalyses(prev => prev.filter(x => x.id !== id));
+        setMeta(prev => ({ ...prev, total: Math.max(0, prev.total - 1) }));
         if (selectedAnalysis?.id === id) {
           setSelectedAnalysis(null);
         }
-      } catch (e) {
-        alert("Deletion failed inside clinical portal secure core.");
+        setNotification({
+          type: 'success',
+          title: 'Record Deleted',
+          message: `Patient analysis record #${id} was deleted successfully.`
+        });
+      } catch (err: any) {
+        const parsed = parseClinicalError(err);
+        setNotification({
+          type: 'error',
+          title: parsed.title,
+          message: parsed.message,
+          suggestion: parsed.suggestion
+        });
       }
     }
   };
 
   // Perform search & state filtering
   const filteredAnalyses = analyses.filter((item) => {
-    const matchesSearch = item.patientId.toLowerCase().includes(searchId.toLowerCase()) || 
-                          item.patientName.toLowerCase().includes(searchId.toLowerCase());
+    const query = searchId.trim().toLowerCase();
+    const matchesSearch = !query || 
+                          item.patientId.toLowerCase().includes(query) || 
+                          item.patientName.toLowerCase().includes(query) ||
+                          item.id.toLowerCase().includes(query) ||
+                          (item.location && item.location.toLowerCase().includes(query));
     
-    if (statusFilter === "All Results") return matchesSearch;
-    if (statusFilter === "Anomaly Detected") return matchesSearch && item.diagnosis === DiagnosisResult.ANOMALY_DETECTED;
-    if (statusFilter === "Normal Findings") return matchesSearch && item.diagnosis === DiagnosisResult.NORMAL_FINDINGS;
-    if (statusFilter === "Review Required") return matchesSearch && item.diagnosis === DiagnosisResult.REVIEW_REQUIRED;
+    // Status filter
+    let matchesStatus = true;
+    if (statusFilter === "Anomaly Detected") matchesStatus = item.diagnosis === DiagnosisResult.ANOMALY_DETECTED;
+    else if (statusFilter === "Normal Findings") matchesStatus = item.diagnosis === DiagnosisResult.NORMAL_FINDINGS;
+    else if (statusFilter === "Review Required") matchesStatus = item.diagnosis === DiagnosisResult.REVIEW_REQUIRED;
+
+    // Date filter
+    let matchesDate = true;
+    if (dateFilter !== "All Time") {
+      const itemTime = new Date(item.createdAt).getTime();
+      const now = Date.now();
+      if (!isNaN(itemTime)) {
+        if (dateFilter === "Last 7 Days") matchesDate = itemTime >= now - 7 * 86400000;
+        else if (dateFilter === "Last 30 Days") matchesDate = itemTime >= now - 30 * 86400000;
+        else if (dateFilter === "Last 90 Days") matchesDate = itemTime >= now - 90 * 86400000;
+      }
+    }
     
-    return matchesSearch;
+    return matchesSearch && matchesStatus && matchesDate;
   });
 
-  // Simple relative date formatting
+  // Relative date formatting
   const formatDateTime = (isoString: string) => {
     try {
       const date = new Date(isoString);
+      if (isNaN(date.getTime())) {
+        return { date: "Unknown Date", time: "--:--" };
+      }
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       const formattedDate = `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
       
       let hours = date.getHours();
       const minutes = date.getMinutes().toString().padStart(2, '0');
-      const ampm = hours >= 12 ? 'PST' : 'AM'; // Match the PST tag in mockups
+      const ampm = hours >= 12 ? 'PM' : 'AM';
       hours = hours % 12;
-      hours = hours ? hours : 12; // 0 should be 12
+      hours = hours ? hours : 12;
       
       return {
         date: formattedDate,
         time: `${hours}:${minutes} ${ampm}`
       };
     } catch {
-      return { date: "Oct 24, 2024", time: "14:32 PST" };
+      return { date: "Unknown Date", time: "--:--" };
     }
   };
 
@@ -123,20 +231,42 @@ export default function AppHistory() {
             />
           </div>
 
-          {/* Date range trigger */}
-          <button 
-            onClick={() => alert("Simulation date threshold filter triggers last 30 days of standard clinical cycles.")}
-            className="flex items-center gap-1.5 px-3 py-2 bg-white border border-[#c3c6d7] rounded-lg text-xs font-sans text-[#131b2e] hover:bg-[#faf8ff] transition-colors cursor-pointer"
-          >
-            <Calendar className="w-4 h-4 text-[#737686]" />
-            Last 30 Days
-            <span className="text-[10px] text-[#737686]">▼</span>
-          </button>
+          {/* Date range trigger dropdown */}
+          <div className="relative">
+            <button 
+              onClick={() => { setShowDateDropdown(!showDateDropdown); setShowFilterDropdown(false); }}
+              className="flex items-center gap-1.5 px-3 py-2 bg-white border border-[#c3c6d7] rounded-lg text-xs font-sans text-[#131b2e] hover:bg-[#faf8ff] transition-colors cursor-pointer"
+            >
+              <Calendar className="w-4 h-4 text-[#737686]" />
+              {dateFilter}
+              <span className="text-[10px] text-[#737686]">▼</span>
+            </button>
+
+            {showDateDropdown && (
+              <div className="absolute right-0 mt-1 bg-white border border-[#c3c6d7] rounded-lg shadow-lg z-20 py-1 w-44 font-sans text-xs">
+                {(["All Time", "Last 7 Days", "Last 30 Days", "Last 90 Days"] as const).map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => {
+                      setDateFilter(opt);
+                      setShowDateDropdown(false);
+                    }}
+                    className={`w-full text-left px-3 py-2 hover:bg-[#f2f3ff] text-[#131b2e] cursor-pointer flex items-center justify-between ${
+                      dateFilter === opt ? "font-bold text-[#2563eb] bg-[#f2f3ff]" : ""
+                    }`}
+                  >
+                    <span>{opt}</span>
+                    {dateFilter === opt && <CheckCircle2 className="w-3.5 h-3.5 text-[#2563eb]" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Diagnosis code filter dropdown */}
           <div className="relative">
             <button 
-              onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+              onClick={() => { setShowFilterDropdown(!showFilterDropdown); setShowDateDropdown(false); }}
               className="flex items-center gap-1.5 px-3 py-2 bg-white border border-[#c3c6d7] rounded-lg text-xs font-sans text-[#131b2e] hover:bg-[#faf8ff] transition-colors cursor-pointer"
             >
               <Filter className="w-4 h-4 text-[#737686]" />
@@ -153,9 +283,12 @@ export default function AppHistory() {
                       setStatusFilter(opt);
                       setShowFilterDropdown(false);
                     }}
-                    className="w-full text-left px-3 py-2 hover:bg-[#f2f3ff] text-[#131b2e] cursor-pointer"
+                    className={`w-full text-left px-3 py-2 hover:bg-[#f2f3ff] text-[#131b2e] cursor-pointer flex items-center justify-between ${
+                      statusFilter === opt ? "font-bold text-[#2563eb] bg-[#f2f3ff]" : ""
+                    }`}
                   >
-                    {opt}
+                    <span>{opt}</span>
+                    {statusFilter === opt && <CheckCircle2 className="w-3.5 h-3.5 text-[#2563eb]" />}
                   </button>
                 ))}
               </div>
@@ -165,6 +298,35 @@ export default function AppHistory() {
         </div>
       </div>
 
+      {/* Clinical Notification Banner */}
+      {notification && (
+        <div className={`p-4 rounded-xl border flex items-start justify-between gap-3 text-xs animate-in fade-in duration-200 shadow-sm ${
+          notification.type === 'error' ? 'bg-red-50/90 border-red-200 text-red-800' :
+          notification.type === 'success' ? 'bg-emerald-50/90 border-emerald-200 text-emerald-800' :
+          'bg-blue-50/90 border-blue-200 text-blue-800'
+        }`}>
+          <div className="flex items-start gap-2.5">
+            {notification.type === 'error' ? <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" /> :
+             notification.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" /> :
+             <Sparkles className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />}
+            <div>
+              <h4 className="font-bold text-xs">{notification.title}</h4>
+              <p className="mt-0.5 opacity-90">{notification.message}</p>
+              {notification.suggestion && (
+                <p className="mt-1 text-[11px] font-medium opacity-80 italic">💡 {notification.suggestion}</p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={() => setNotification(null)}
+            className="text-[#737686] hover:text-[#131b2e] p-1 rounded transition-colors cursor-pointer"
+            title="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Main Table view container (Identical to Screen 3 Table layout) */}
       <div className="bg-white border border-[#c3c6d7] rounded-xl overflow-hidden shadow-sm flex flex-col justify-between">
         
@@ -172,11 +334,30 @@ export default function AppHistory() {
           <div className="p-6">
             <LoadingSkeleton />
           </div>
+        ) : analyses.length === 0 ? (
+          <div className="py-20 text-center space-y-3 px-4">
+            <div className="w-12 h-12 rounded-full bg-[#f2f3ff] mx-auto flex items-center justify-center text-[#2563eb]">
+              <FileText className="w-6 h-6" />
+            </div>
+            <div>
+              <h4 className="font-bold text-[#131b2e] text-sm">No analyses yet</h4>
+              <p className="text-xs text-[#737686] max-w-sm mx-auto mt-1">
+                Upload your first kidney ultrasound to begin analysis and build your clinical record history.
+              </p>
+            </div>
+            <Link
+              to="/analysis"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#2563eb] hover:bg-[#004ac6] text-white text-xs font-bold rounded-lg shadow-sm transition-all"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              Start New Analysis
+            </Link>
+          </div>
         ) : filteredAnalyses.length === 0 ? (
           <div className="py-24 text-center text-[#737686] space-y-2">
             <AlertCircle className="w-8 h-8 text-[#737686] opacity-40 mx-auto" />
             <p className="font-sans text-xs font-bold">No clinical logs matched your search terms.</p>
-            <button onClick={() => { setSearchId(""); setStatusFilter("All Results"); }} className="text-[#2563eb] text-[11px] font-semibold hover:underline">
+            <button onClick={() => { setSearchId(""); setStatusFilter("All Results"); }} className="text-[#2563eb] text-[11px] font-semibold hover:underline cursor-pointer">
               Reset all search filters
             </button>
           </div>
@@ -204,13 +385,38 @@ export default function AppHistory() {
                   return (
                     <tr 
                       key={item.id} 
-                      onClick={() => { setSelectedAnalysis(item); }}
+                      onClick={() => { openDetails(item); }}
                       className="hover:bg-[#f2f3ff] transition-colors cursor-pointer group"
                     >
-                      {/* Patient ID */}
+                      {/* Patient ID & Thumbnail with Image Preview */}
                       <td className="py-4 px-6 font-semibold text-[#131b2e]">
-                        {item.patientId}
-                        <span className="block text-[10px] text-[#737686] font-normal">{item.patientName}</span>
+                        <div className="flex items-center gap-3">
+                          <div 
+                            className="relative group/thumb cursor-pointer shrink-0"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEnlargedImageUrl(item.imageUrl);
+                              setEnlargedImageTitle(`${item.patientName || item.patientId} — Ultrasound Scan (#${item.id})`);
+                            }}
+                            title="Click to inspect ultrasound scan"
+                          >
+                            <img
+                              src={item.imageUrl}
+                              alt="Ultrasound scan"
+                              className="w-10 h-10 rounded-lg object-cover border border-[#c3c6d7] bg-neutral-900 group-hover/thumb:ring-2 group-hover/thumb:ring-[#2563eb] transition-all"
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=400&q=80";
+                              }}
+                            />
+                            <div className="absolute inset-0 bg-black/40 rounded-lg opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center text-white">
+                              <ZoomIn className="w-3.5 h-3.5" />
+                            </div>
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate">{item.patientId}</div>
+                            <span className="block text-[10px] text-[#737686] font-normal truncate">{item.patientName}</span>
+                          </div>
+                        </div>
                       </td>
 
                       {/* Date & Time */}
@@ -271,13 +477,32 @@ export default function AppHistory() {
                       <td className="py-4 px-6 text-right">
                         <div className="flex items-center justify-end gap-1.5 md:opacity-0 group-hover:opacity-100 transition-opacity">
                           
-                          {/* Viewer Trigger */}
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); setSelectedAnalysis(item); }}
-                            className="p-1.5 text-[#434655] hover:text-[#2563eb] hover:bg-[#2563eb]/10 rounded transition-all cursor-pointer"
-                            title="Inspect Details"
+                          {/* PDF Preview Button */}
+                          <button
+                            onClick={(e) => handlePreviewPdf(item, e)}
+                            disabled={previewLoadingId === item.id}
+                            className="p-1.5 text-[#2563eb] hover:text-[#004ac6] hover:bg-[#2563eb]/10 rounded transition-all cursor-pointer disabled:opacity-50"
+                            title="Preview PDF Report"
                           >
-                            <Eye className="w-4 h-4" />
+                            {previewLoadingId === item.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Eye className="w-4 h-4" />
+                            )}
+                          </button>
+
+                          {/* PDF Download Button */}
+                          <button
+                            onClick={(e) => handleDownloadPdf(item, e)}
+                            disabled={downloadLoadingId === item.id}
+                            className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded transition-all cursor-pointer disabled:opacity-50"
+                            title="Download PDF Report"
+                          >
+                            {downloadLoadingId === item.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
                           </button>
 
                           {/* Delete Trigger */}
@@ -380,40 +605,33 @@ export default function AppHistory() {
                 </div>
               </div>
 
-              {/* Patient Scan Slice with Grad-CAM toggler toggle */}
+              {/* Patient Scan Slice */}
               <div className="space-y-2">
                 <div className="flex justify-between items-center text-xs">
-                  <span className="font-bold text-[#131b2e]">Ultrasound Sweep Focus Area</span>
-                  <button 
-                    onClick={() => setGradCamOverlay(!gradCamOverlay)}
-                    className={`px-3 py-1 rounded-full text-[10px] font-bold border transition-all ${
-                      gradCamOverlay 
-                        ? "bg-[#2563eb] text-white border-[#2563eb]" 
-                        : "bg-white text-[#737686] border-[#c3c6d7]"
-                    }`}
-                  >
-                    Toggle Grad-CAM Maps
-                  </button>
+                  <span className="font-bold text-[#131b2e]">Ultrasound Sweep Slice</span>
+                  <span className="text-[11px] text-[#737686]">Click to enlarge</span>
                 </div>
                 
-                <div className="aspect-video bg-black rounded-lg relative overflow-hidden flex items-center justify-center border border-[#c3c6d7]">
+                <div 
+                  onClick={() => {
+                    setEnlargedImageUrl(selectedAnalysis.imageUrl);
+                    setEnlargedImageTitle(`${selectedAnalysis.patientName || selectedAnalysis.patientId} — Ultrasound Sweep Slice (#${selectedAnalysis.id})`);
+                  }}
+                  className="aspect-video bg-black rounded-lg relative overflow-hidden flex items-center justify-center border border-[#c3c6d7] cursor-pointer group"
+                  title="Click to expand scan image"
+                >
                   <img 
                     alt="Rad slide target" 
-                    className="w-full h-full object-cover" 
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
                     src={selectedAnalysis.imageUrl} 
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=800&q=80";
+                    }}
                   />
-                  {gradCamOverlay && selectedAnalysis.diagnosis !== DiagnosisResult.NORMAL_FINDINGS && (
-                    <div 
-                      className="absolute inset-0 bg-radial-heatmap opacity-75 pointer-events-none mix-blend-color-burn"
-                      style={{ 
-                        backgroundImage: `radial-gradient(circle at 45% 40%, rgba(239, 68, 68, 0.95) 0%, rgba(245, 158, 11, 0.7) 30%, rgba(13, 148, 136, 0.4) 50%, rgba(37, 99, 235, 0.1) 75%)`
-                      }}
-                    />
-                  )}
-                  {/* Floating target bounds box */}
-                  {selectedAnalysis.diagnosis === DiagnosisResult.ANOMALY_DETECTED && (
-                    <div className="absolute top-[32%] left-[30%] w-14 h-14 border-2 border-dashed border-red-500 rounded-full flex items-center justify-center animate-pulse" />
-                  )}
+                  <div className="absolute bottom-2 right-2 bg-black/70 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <ZoomIn className="w-3.5 h-3.5" />
+                    Inspect Slice
+                  </div>
                 </div>
               </div>
 
@@ -456,45 +674,266 @@ export default function AppHistory() {
                 </p>
               </div>
 
-              {/* Clinician's Notes Addendum Display */}
+              {/* Clinician's Notes Addendum Display & Editor */}
               <div className="space-y-2">
-                <div className="font-sans text-xs font-bold text-[#131b2e] flex items-center gap-1.5">
-                  <ClipboardCheck className="w-4.5 h-4.5 text-[#2563eb]" />
-                  Radiological Signature Addendum
+                <div className="flex justify-between items-center">
+                  <div className="font-sans text-xs font-bold text-[#131b2e] flex items-center gap-1.5">
+                    <ClipboardCheck className="w-4 h-4 text-[#2563eb]" />
+                    Radiological Signature Addendum
+                  </div>
+                  {!isEditingNote ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingNote(true)}
+                      className="text-[11px] font-bold text-[#2563eb] hover:underline cursor-pointer"
+                    >
+                      {selectedAnalysis.clinicianNotes ? "Edit Addendum" : "+ Add Note"}
+                    </button>
+                  ) : (
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingNoteText(selectedAnalysis.clinicianNotes || "");
+                          setIsEditingNote(false);
+                        }}
+                        className="px-2 py-0.5 text-[10px] text-[#434655] hover:bg-gray-100 rounded cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={submittingNote}
+                        onClick={async () => {
+                          setSubmittingNote(true);
+                          try {
+                            const updated = await updateAnalysis(selectedAnalysis.id, {
+                              clinicianNotes: editingNoteText.trim()
+                            });
+                            setSelectedAnalysis(updated);
+                            setAnalyses(prev => prev.map(a => a.id === updated.id ? updated : a));
+                            setIsEditingNote(false);
+                            setNoteSavedFeedback(true);
+                            setTimeout(() => setNoteSavedFeedback(false), 3000);
+                          } catch (e: any) {
+                            const parsed = parseClinicalError(e);
+                            setNotification({
+                              type: 'error',
+                              title: parsed.title,
+                              message: parsed.message,
+                              suggestion: parsed.suggestion
+                            });
+                          } finally {
+                            setSubmittingNote(false);
+                          }
+                        }}
+                        className="px-2.5 py-0.5 bg-[#2563eb] hover:bg-[#004ac6] text-white text-[10px] font-bold rounded flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      >
+                        {submittingNote ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                        Save Note
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="p-3 bg-[#faf8ff] rounded-lg border border-[#c3c6d7] text-xs text-[#434655] leading-relaxed min-h-[50px] whitespace-pre-wrap">
-                  {selectedAnalysis.clinicianNotes || "No clinical notes appended at the time of authorization. Edit notes in New Analysis workspace to lock signature."}
-                </div>
+
+                {isEditingNote ? (
+                  <textarea
+                    className="w-full p-2.5 bg-white border border-[#2563eb] rounded-lg text-xs text-[#131b2e] leading-relaxed outline-none min-h-[80px]"
+                    value={editingNoteText}
+                    onChange={(e) => setEditingNoteText(e.target.value)}
+                    placeholder="Enter clinical biopsy indicators, Doppler notes, or comments..."
+                  />
+                ) : (
+                  <div className="p-3 bg-[#faf8ff] rounded-lg border border-[#c3c6d7] text-xs text-[#434655] leading-relaxed min-h-[50px] whitespace-pre-wrap">
+                    {selectedAnalysis.clinicianNotes || "No clinical notes appended. Click '+ Add Note' above to record radiological impressions."}
+                  </div>
+                )}
+                {noteSavedFeedback && (
+                  <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-block">
+                    ✓ Addendum notes saved to database and PDF report
+                  </span>
+                )}
               </div>
 
             </div>
 
             {/* Folder Print Action Footer */}
-            <div className="pt-4 border-t border-[#e2e8f0] flex gap-3">
+            <div className="pt-4 border-t border-[#e2e8f0] flex gap-2">
+              {/* Preview Button */}
+              <button 
+                onClick={async (e) => {
+                  try {
+                    // Persist note if dirty
+                    if (isEditingNote && editingNoteText.trim() !== (selectedAnalysis.clinicianNotes || "")) {
+                      const updated = await updateAnalysis(selectedAnalysis.id, {
+                        clinicianNotes: editingNoteText.trim()
+                      });
+                      setSelectedAnalysis(updated);
+                      setAnalyses(prev => prev.map(a => a.id === updated.id ? updated : a));
+                      setIsEditingNote(false);
+                    }
+                    handlePreviewPdf(selectedAnalysis, e);
+                  } catch (err: any) {
+                    const parsed = parseClinicalError(err);
+                    setNotification({
+                      type: 'error',
+                      title: parsed.title,
+                      message: parsed.message,
+                      suggestion: parsed.suggestion
+                    });
+                  }
+                }}
+                disabled={previewLoadingId === selectedAnalysis.id}
+                className="flex-1 border border-[#2563eb] text-[#2563eb] hover:bg-[#2563eb]/10 font-sans font-semibold text-xs py-2.5 rounded-lg text-center flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all"
+              >
+                {previewLoadingId === selectedAnalysis.id ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+                Preview PDF
+              </button>
+
+              {/* Download Button */}
               <button 
                 onClick={async (e) => {
                   try {
                     const btn = e.currentTarget;
                     btn.innerHTML = '<span class="animate-pulse">Downloading...</span>';
+                    
+                    // If notes were edited in text area, persist before download
+                    if (isEditingNote && editingNoteText.trim() !== (selectedAnalysis.clinicianNotes || "")) {
+                      const updated = await updateAnalysis(selectedAnalysis.id, {
+                        clinicianNotes: editingNoteText.trim()
+                      });
+                      setSelectedAnalysis(updated);
+                      setAnalyses(prev => prev.map(a => a.id === updated.id ? updated : a));
+                      setIsEditingNote(false);
+                    }
+
                     await downloadReport(selectedAnalysis.id.toString());
-                    btn.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-award"><circle cx="12" cy="8" r="6"/><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"/></svg> Dossier Export Print';
-                  } catch (err) {
-                    alert("Failed to download PDF report. Ensure backend is running.");
+                    btn.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-download"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg> Download PDF';
+                    setNotification({
+                      type: 'success',
+                      title: 'Report Downloaded',
+                      message: `Diagnostic report for study #${selectedAnalysis.id} downloaded successfully.`
+                    });
+                  } catch (err: any) {
+                    const parsed = parseClinicalError(err);
+                    setNotification({
+                      type: 'error',
+                      title: parsed.title,
+                      message: parsed.message,
+                      suggestion: parsed.suggestion
+                    });
                   }
                 }}
-                className="flex-1 bg-[#2563eb] hover:bg-[#004ac6] text-white font-sans font-semibold text-xs py-2.5 rounded-lg text-center flex items-center justify-center gap-1.5 cursor-pointer"
+                className="flex-1 bg-[#2563eb] hover:bg-[#004ac6] text-white font-sans font-semibold text-xs py-2.5 rounded-lg text-center flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-sm"
               >
-                <Award className="w-4 h-4" />
-                Dossier Export Print
+                <Download className="w-4 h-4" />
+                Download PDF
               </button>
+
               <button
                 onClick={() => setSelectedAnalysis(null)}
-                className="px-4 py-2 border border-[#c3c6d7] hover:bg-[#faf8ff] text-xs font-sans text-[#131b2e] rounded-lg cursor-pointer"
+                className="px-3.5 py-2 border border-[#c3c6d7] hover:bg-[#faf8ff] text-xs font-sans text-[#131b2e] rounded-lg cursor-pointer"
               >
                 Close
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* In-App PDF Preview Modal */}
+      {previewPdfUrl && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in duration-200">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 border-b border-[#e2e8f0] flex items-center justify-between bg-[#f9fafb]">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4.5 h-4.5 text-[#2563eb] shrink-0" />
+                <h3 className="font-bold text-sm text-[#131b2e] truncate">{previewPdfTitle || "Diagnostic Report Preview"}</h3>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={previewPdfUrl}
+                  download="kidneyvision_diagnostic_report.pdf"
+                  className="px-3 py-1.5 bg-[#2563eb] text-white hover:bg-blue-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Download
+                </a>
+                <button
+                  onClick={() => {
+                    if (previewPdfUrl.startsWith("blob:")) {
+                      URL.revokeObjectURL(previewPdfUrl);
+                    }
+                    setPreviewPdfUrl(null);
+                  }}
+                  className="p-1.5 text-[#737686] hover:text-[#131b2e] hover:bg-neutral-200 rounded-lg transition-all cursor-pointer"
+                  title="Close Preview"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body with PDF Viewer iframe */}
+            <div className="flex-1 bg-[#525659] relative min-h-[550px]">
+              <iframe
+                src={`${previewPdfUrl}#toolbar=1&navpanes=0`}
+                title="Diagnostic Report PDF"
+                className="w-full h-full min-h-[550px] border-0"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Enlarged Image Lightbox Modal */}
+      {enlargedImageUrl && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setEnlargedImageUrl(null)}
+        >
+          <div 
+            className="bg-neutral-900 border border-neutral-700 rounded-2xl shadow-2xl max-w-3xl w-full overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3 border-b border-neutral-800 flex items-center justify-between text-neutral-200">
+              <h3 className="font-bold text-sm text-white truncate">{enlargedImageTitle || "Ultrasound Scan Inspection"}</h3>
+              <button
+                onClick={() => setEnlargedImageUrl(null)}
+                className="p-1.5 text-neutral-400 hover:text-white hover:bg-neutral-800 rounded-lg transition-all cursor-pointer"
+                title="Close Viewer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 flex items-center justify-center bg-black min-h-[400px]">
+              <img
+                src={enlargedImageUrl}
+                alt="High-resolution ultrasound scan"
+                className="max-h-[70vh] w-auto max-w-full object-contain rounded"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=800&q=80";
+                }}
+              />
+            </div>
+            <div className="px-5 py-2.5 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400">
+              <span>High-resolution ultrasound acquisition slice</span>
+              <a
+                href={enlargedImageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[#38bdf8] hover:underline flex items-center gap-1"
+              >
+                Open original file <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
           </div>
         </div>
       )}

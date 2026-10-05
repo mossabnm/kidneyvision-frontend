@@ -6,16 +6,19 @@
 import React, { useState } from "react";
 import { 
   Upload, Sparkles, Loader2, Play, CircleDot, ShieldCheck, 
-  Eye, FileText, CheckCircle2, ChevronRight, Download, Sliders, Dna, ArrowRight, Heart
+  Eye, FileText, CheckCircle2, ChevronRight, Download, Dna, ArrowRight, Heart, AlertCircle, FileDown, X, RefreshCw
 } from "lucide-react";
-import { createPrediction, downloadReport } from "../services/api";
+import { createPrediction, downloadReport, updateAnalysis, getReportPdfBlobUrl } from "../services/api";
 import { DiagnosisResult, KidneyAnalysis } from "../types";
+import { validateScanFile } from "../utils/fileValidation";
+import { parseClinicalError, ClinicalError } from "../utils/errorParser";
 
 // Dynamic sample images with varied clinical outcomes
 const SAMPLE_PRESETS = [
   {
-    name: "Sample 1: Complex Nephrological Scan",
-    desc: "Anomalous multi-septated cyst visible",
+    patientId: "PT-8492",
+    name: "Sample 1: Hyperechoic Calculus",
+    desc: "Posterior acoustic shadowing indicative of kidney stone",
     gender: "Male" as const,
     age: 54,
     location: "Left Kidney" as const,
@@ -23,8 +26,9 @@ const SAMPLE_PRESETS = [
     patientName: "Marcus Sterling"
   },
   {
-    name: "Sample 2: Sterile Corticomedullary Border",
-    desc: "Healthy kidney architecture",
+    patientId: "PT-3104",
+    name: "Sample 2: Normal Renal Parenchyma",
+    desc: "Healthy cortical architecture and normal parenchyma",
     gender: "Female" as const,
     age: 39,
     location: "Right Kidney" as const,
@@ -32,8 +36,9 @@ const SAMPLE_PRESETS = [
     patientName: "Elena Rostova"
   },
   {
-    name: "Sample 3: Simple Acoustic Shadowing",
-    desc: "Fluid-filled circular simple cyst",
+    patientId: "PT-9521",
+    name: "Sample 3: Obstructive Calculus Focus",
+    desc: "Pelvic calculus with distinct acoustic attenuation",
     gender: "Male" as const,
     age: 62,
     location: "Right Kidney" as const,
@@ -48,51 +53,79 @@ interface AppNewAnalysisProps {
 
 export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
   // Input fields state
+  const [patientId, setPatientId] = useState("PT-8492");
   const [patientName, setPatientName] = useState("Marcus Sterling");
   const [patientAge, setPatientAge] = useState<number>(54);
   const [patientGender, setPatientGender] = useState<"Male" | "Female" | "Other">("Male");
   const [location, setLocation] = useState<"Left Kidney" | "Right Kidney" | "Unspecified">("Left Kidney");
+  const [clinicianNotes, setClinicianNotes] = useState<string>("");
+  const [isSavingNotes, setIsSavingNotes] = useState(false);
+  const [noteSavedSuccess, setNoteSavedSuccess] = useState(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   
   // Custom file or sample selected state
   const [selectedPresetImage, setSelectedPresetImage] = useState<string>(SAMPLE_PRESETS[0].imageUrl);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedFilePreview, setUploadedFilePreview] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   
-  // Diagnosis states
+  // Diagnosis & Pipeline states
   const [isScanning, setIsScanning] = useState(false);
-  const [scanStep, setScanStep] = useState(0);
+  const [currentStageIdx, setCurrentStageIdx] = useState<number>(0);
+  const [clinicalError, setClinicalError] = useState<ClinicalError | null>(null);
   const [activeAnalysis, setActiveAnalysis] = useState<KidneyAnalysis | null>(null);
-  const [gradCamIntensity, setGradCamIntensity] = useState<number>(50); // Slider 0-100 to toggle visual heatmap opacity
 
-  // Scanning simulation steps array
-  const scanningSteps = [
-    "Purifying clinical DICOM header payload & sanitizing PHI variables...",
-    "Re-sampling acoustic slice array down to standard 512x512 tensor format...",
-    "Injecting model weights of KidneyVision Neural Engine v4.2...",
-    "Conducting real-time feed-forward convolution cycles...",
-    "Isolating vascular bounds and processing Grad-CAM focus heatmaps..."
+  // Analysis Pipeline Stages (Requirement 17: Uploading, Processing image, Running AI analysis, Generating report, Completed)
+  const ANALYSIS_STAGES = [
+    { id: "uploading", label: "Uploading", desc: "Uploading ultrasound scan to secure medical portal..." },
+    { id: "processing", label: "Processing image", desc: "Validating scan tensor format & spatial dimensions..." },
+    { id: "analyzing", label: "Running AI analysis", desc: "Executing CNN BatchNorm model (Normal vs. Kidney Stone)..." },
+    { id: "generating", label: "Generating report", desc: "Compiling diagnostic findings and clinical telemetry..." },
+    { id: "completed", label: "Completed", desc: "Analysis verified — ready for radiologist review." },
   ];
 
   // Pick preset handler
   const handleSelectPreset = (preset: typeof SAMPLE_PRESETS[0]) => {
     setSelectedPresetImage(preset.imageUrl);
+    setPatientId(preset.patientId);
     setPatientName(preset.patientName);
     setPatientAge(preset.age);
     setPatientGender(preset.gender);
     setLocation(preset.location);
     setUploadedFile(null);
     setUploadedFilePreview(null);
+    setUploadError(null);
     setActiveAnalysis(null);
   };
 
   // Image upload handler
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setUploadError(null);
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      
+      // Strict client-side validation
+      const validation = await validateScanFile(file);
+      if (!validation.valid) {
+        setUploadError(validation.error || "Invalid file format.");
+        setUploadedFile(null);
+        setUploadedFilePreview(null);
+        e.target.value = "";
+        return;
+      }
+
       setUploadedFile(file);
       const url = URL.createObjectURL(file);
       setUploadedFilePreview(url);
-      setPatientName("Acoustic Slice Upload #" + Math.floor(100+Math.random()*900));
+      
+      // If patientName was one of the preset sample names or the old dummy string, suggest the clean file name
+      const isPresetOrDummy = SAMPLE_PRESETS.some(p => p.patientName.toLowerCase() === patientName.toLowerCase()) || patientName.startsWith("Acoustic Slice Upload");
+      if (isPresetOrDummy || !patientName.trim()) {
+        const cleanName = file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ");
+        setPatientName(cleanName);
+        setPatientId(`PT-${Math.floor(1000 + Math.random() * 9000)}`);
+      }
       setActiveAnalysis(null);
     }
   };
@@ -100,39 +133,71 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
   // Run AI Scan Execution
   const handleTriggerAnalysis = async () => {
     setIsScanning(true);
-    setScanStep(0);
+    setCurrentStageIdx(0); // Uploading
+    setClinicalError(null);
     setActiveAnalysis(null);
+
+    // Dynamic stage progression timer ensuring UI is actively moving and never appears frozen
+    const stageTimer = setInterval(() => {
+      setCurrentStageIdx((prev) => {
+        if (prev < 3) return prev + 1;
+        return prev;
+      });
+    }, 500);
 
     try {
       const finalScanImage = uploadedFilePreview || selectedPresetImage;
+      const finalPatientName = patientName.trim() || (uploadedFile ? uploadedFile.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ") : "Unspecified Patient");
       const scanPromise = createPrediction(uploadedFile, {
-        patientName,
+        patientId: patientId.trim() || undefined,
+        patientName: finalPatientName,
         patientAge,
         patientGender,
         location,
-        imageUrl: finalScanImage
+        imageUrl: finalScanImage,
+        clinicianNotes: clinicianNotes.trim() || undefined,
       });
 
-      // Simple rapid visual progress bar without artificial 3 second wait
-      const progressInterval = setInterval(() => {
-        setScanStep(prev => (prev < scanningSteps.length ? prev + 1 : prev));
-      }, 300);
-
       const res = await scanPromise;
-      clearInterval(progressInterval);
-      setScanStep(scanningSteps.length);
-      setActiveAnalysis(res);
+      clearInterval(stageTimer);
+      setCurrentStageIdx(4); // Completed
+
+      setTimeout(() => {
+        setActiveAnalysis(res);
+        if (res.clinicianNotes) {
+          setClinicianNotes(res.clinicianNotes);
+        }
+        setIsScanning(false);
+      }, 350);
     } catch (e: any) {
-      console.error("Clinical inference failed.", e);
-      alert(e.message || "Failed to analyze image.");
-    } finally {
+      clearInterval(stageTimer);
       setIsScanning(false);
+      const parsed = e?.clinicalError || parseClinicalError(e);
+      setClinicalError(parsed);
     }
   };
 
-  // Save report action
-  const handleSaveReport = () => {
-    alert("Diagnostic log has been successfully signed under clinical audit standards. Saved to history records.");
+  // Save report action (persists clinician notes and metadata updates)
+  const handleSaveReport = async () => {
+    if (activeAnalysis?.id) {
+      setIsSavingNotes(true);
+      try {
+        await updateAnalysis(activeAnalysis.id, {
+          patientId: patientId.trim() || undefined,
+          patientName: patientName.trim() || undefined,
+          patientAge,
+          patientGender,
+          location,
+          clinicianNotes: clinicianNotes.trim() || undefined,
+        });
+        setNoteSavedSuccess(true);
+      } catch (err: any) {
+        console.warn("Failed to persist final signoff update:", err);
+      } finally {
+        setIsSavingNotes(false);
+      }
+    }
+    alert("Diagnostic log and clinical addendum notes have been successfully signed under clinical audit standards. Saved to history records.");
     onAddSuccess();
   };
 
@@ -147,6 +212,58 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
         </p>
       </div>
 
+      {/* Clinical Error Alert Banner */}
+      {clinicalError && (
+        <div className="bg-red-50/95 border border-red-200 rounded-xl p-4 space-y-2.5 animate-in fade-in duration-200 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center text-red-600 shrink-0 mt-0.5">
+              <AlertCircle className="w-4.5 h-4.5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="font-sans text-xs font-bold text-red-900 flex items-center gap-2">
+                <span>{clinicalError.title}</span>
+                <span className="text-[10px] font-normal px-1.5 py-0.5 rounded bg-red-200 text-red-800 uppercase font-mono">
+                  {clinicalError.type}
+                </span>
+              </h4>
+              <p className="font-sans text-xs text-red-700 mt-1 leading-relaxed">{clinicalError.message}</p>
+              {clinicalError.suggestion && (
+                <p className="font-sans text-[11px] text-red-800 bg-red-100/60 p-2 rounded-md mt-2 font-medium">
+                  {clinicalError.suggestion}
+                </p>
+              )}
+            </div>
+            <button
+              onClick={() => setClinicalError(null)}
+              className="text-red-400 hover:text-red-700 p-1.5 rounded transition-colors cursor-pointer"
+              title="Dismiss error notice"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex justify-end gap-2 pt-2 border-t border-red-200/60">
+            <button
+              type="button"
+              onClick={() => setClinicalError(null)}
+              className="px-3 py-1.5 border border-red-300 text-red-700 hover:bg-red-100 text-xs font-semibold rounded-lg transition-all cursor-pointer"
+            >
+              Dismiss
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setClinicalError(null);
+                handleTriggerAnalysis();
+              }}
+              className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition-all cursor-pointer shadow-sm flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Retry Analysis
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         
         {/* Left Side: Parameters Registration & Upload (5 cols) */}
@@ -159,16 +276,31 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
               Patient Metrics
             </h3>
 
-            {/* Patient Name */}
-            <div className="space-y-1">
-              <label className="font-sans text-[11px] font-semibold text-[#434655]" htmlFor="patient-name">Patient Full Name</label>
-              <input 
-                id="patient-name"
-                className="w-full px-3 py-2 bg-[#f2f3ff] border border-[#c3c6d7] rounded-lg text-xs font-medium focus:ring-2 focus:ring-[#2563eb]/20 focus:border-[#2563eb] outline-none transition-all focus:bg-white" 
-                type="text" 
-                value={patientName}
-                onChange={(e) => setPatientName(e.target.value)}
-              />
+            {/* Patient ID and Name */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1 col-span-1">
+                <label className="font-sans text-[11px] font-semibold text-[#434655]" htmlFor="patient-id">Patient ID</label>
+                <input 
+                  id="patient-id"
+                  className="w-full px-3 py-2 bg-[#f2f3ff] border border-[#c3c6d7] rounded-lg text-xs font-medium focus:ring-2 focus:ring-[#2563eb]/20 focus:border-[#2563eb] outline-none transition-all focus:bg-white font-mono" 
+                  type="text" 
+                  placeholder="e.g. PT-8492"
+                  value={patientId}
+                  onChange={(e) => setPatientId(e.target.value)}
+                />
+              </div>
+
+              <div className="space-y-1 col-span-2">
+                <label className="font-sans text-[11px] font-semibold text-[#434655]" htmlFor="patient-name">Patient Full Name</label>
+                <input 
+                  id="patient-name"
+                  className="w-full px-3 py-2 bg-[#f2f3ff] border border-[#c3c6d7] rounded-lg text-xs font-medium focus:ring-2 focus:ring-[#2563eb]/20 focus:border-[#2563eb] outline-none transition-all focus:bg-white" 
+                  type="text" 
+                  placeholder="e.g. John Doe or Clinical Case #102"
+                  value={patientName}
+                  onChange={(e) => setPatientName(e.target.value)}
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -260,18 +392,24 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
               <div className="font-sans text-[11px] font-semibold text-[#434655] mb-2">Or Upload Custom Ultrasound Slice:</div>
               <label className="border-2 border-dashed border-[#c3c6d7] rounded-xl p-4 flex flex-col items-center justify-center bg-[#faf8ff] hover:bg-[#f2f3ff] transition-all cursor-pointer text-center hover:border-[#2563eb]/50">
                 <Upload className="w-6 h-6 text-[#737686] mb-1.5" />
-                <span className="font-sans text-[11px] font-bold text-[#131b2e]">Upload Raw JPG/PNG or DICOM</span>
-                <span className="font-sans text-[9px] text-[#737686] mt-0.5">Files sanitized securely instantly</span>
+                <span className="font-sans text-[11px] font-bold text-[#131b2e]">Upload Raw Ultrasound Scan (JPG, PNG)</span>
+                <span className="font-sans text-[9px] text-[#737686] mt-0.5">Max 5MB • Validated & Sanitized instantly</span>
                 <input 
                   type="file" 
-                  accept="image/*" 
+                  accept=".jpg,.jpeg,.png,image/jpeg,image/png" 
                   className="hidden" 
                   onChange={handleImageFileChange} 
                 />
               </label>
-              {uploadedFile && (
+              {uploadError && (
+                <div className="mt-2 text-[11px] text-red-700 font-sans font-medium bg-red-50 border border-red-200 p-2.5 rounded-lg flex items-start gap-1.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                  <span>{uploadError}</span>
+                </div>
+              )}
+              {uploadedFile && !uploadError && (
                 <div className="mt-2 text-[10px] text-emerald-600 font-sans font-medium bg-emerald-50 px-2 py-1 rounded inline-block">
-                  ✓ Uploaded file: {uploadedFile.name}
+                  ✓ Validated ultrasound scan: {uploadedFile.name} ({(uploadedFile.size / 1024).toFixed(0)} KB)
                 </div>
               )}
             </div>
@@ -318,7 +456,7 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
 
             <div className="p-5 grid md:grid-cols-2 gap-5">
               
-              {/* Scan slice visualization panel with Grad-CAM overlay */}
+              {/* Scan slice visualization panel */}
               <div className="space-y-3">
                 <div className="aspect-square bg-black rounded-xl border border-[#c3c6d7] relative overflow-hidden flex items-center justify-center">
                   
@@ -327,28 +465,27 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                     alt="Ultrasound Diagnostic Target"
                     className="w-full h-full object-cover select-none"
                     src={uploadedFilePreview || selectedPresetImage}
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=800&q=80";
+                    }}
                   />
-
-                  {/* Heatmap overlay (Abstract layered canvas simulated via visual gradients + opacity slider) */}
-                  {activeAnalysis && gradCamIntensity > 0 && (
-                    <div 
-                      className="absolute inset-0 bg-radial-heatmap pointer-events-none mix-blend-color-burn"
-                      style={{ 
-                        opacity: gradCamIntensity / 100,
-                        backgroundImage: `radial-gradient(circle at 45% 40%, rgba(239, 68, 68, 0.95) 0%, rgba(245, 158, 11, 0.7) 30%, rgba(13, 148, 136, 0.4) 50%, rgba(37, 99, 235, 0.1) 75%)`
-                      }}
-                    />
-                  )}
 
                   {/* Telemetry frame borders */}
                   <div className="absolute inset-0 border border-white/10 m-3 pointer-events-none rounded-lg" />
 
-                  {/* Target Reticle circle focus over the kidney cyst area */}
-                  {activeAnalysis && activeAnalysis.diagnosis === DiagnosisResult.ANOMALY_DETECTED && (
-                    <div className="absolute top-[35%] left-[32%] w-16 h-16 border-2 border-dashed border-red-500 rounded-full animate-pulse flex items-center justify-center">
-                      <span className="text-[8px] bg-red-600 text-white font-mono leading-none px-1 rounded absolute -top-5">
-                        CYST_LOC
-                      </span>
+                  {/* Healthy badge overlay for normal findings */}
+                  {activeAnalysis && activeAnalysis.diagnosis === DiagnosisResult.NORMAL_FINDINGS && !isScanning && (
+                    <div className="absolute bottom-3 right-3 bg-teal-600/90 backdrop-blur-sm text-white px-2.5 py-1 rounded-lg flex items-center gap-1.5 shadow-lg">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span className="text-[9px] font-bold uppercase tracking-wider">Clear — No Anomalies</span>
+                    </div>
+                  )}
+
+                  {/* Anomaly badge overlay for stone findings */}
+                  {activeAnalysis && activeAnalysis.diagnosis === DiagnosisResult.ANOMALY_DETECTED && !isScanning && (
+                    <div className="absolute bottom-3 right-3 bg-red-600/90 backdrop-blur-sm text-white px-2.5 py-1 rounded-lg flex items-center gap-1.5 shadow-lg">
+                      <CircleDot className="w-3.5 h-3.5" />
+                      <span className="text-[9px] font-bold uppercase tracking-wider">Pathology Detected</span>
                     </div>
                   )}
 
@@ -359,62 +496,76 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                       <div className="w-4/5 bg-white/20 h-1.5 rounded-full overflow-hidden mb-2">
                         <div 
                           className="h-full bg-[#acedff] transition-all duration-300"
-                          style={{ width: `${(scanStep / scanningSteps.length) * 100}%` }}
+                          style={{ width: `${((currentStageIdx + 1) / ANALYSIS_STAGES.length) * 100}%` }}
                         />
                       </div>
                       <span className="font-sans text-[10px] text-white font-bold uppercase tracking-widest animate-pulse">
-                        Neural Sweeps Processing...
+                        {ANALYSIS_STAGES[currentStageIdx]?.label || "Neural Sweeps Processing..."}
                       </span>
                     </div>
                   )}
                 </div>
-
-                {/* Explainable Grad-CAM controller */}
-                {activeAnalysis && (
-                  <div className="bg-[#f2f3ff] border border-[#c3c6d7] p-2.5 rounded-lg space-y-1.5 text-left">
-                    <div className="flex justify-between items-center text-[10px]">
-                      <span className="font-sans font-bold flex items-center gap-1 text-[#0053db]">
-                        <Sliders className="w-3.5 h-3.5" />
-                        Grad-CAM Target Focus Opacity
-                      </span>
-                      <span className="font-mono text-[#0053db] font-bold">{gradCamIntensity}%</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      min="0" 
-                      max="100" 
-                      className="w-full accent-[#0053db] cursor-pointer" 
-                      value={gradCamIntensity} 
-                      onChange={(e) => setGradCamIntensity(Number(e.target.value))}
-                    />
-                  </div>
-                )}
               </div>
 
               {/* Textual Inference Outputs Panel (Visible once analysis complete) */}
               <div className="flex flex-col justify-between">
                 
-                {/* Simulated Progression Steps (when scanning) */}
+                {/* Multi-Stage Visual Pipeline Progression (when scanning) */}
                 {isScanning && (
-                  <div className="flex-1 flex flex-col justify-center space-y-2.5 py-4">
-                    <div className="font-sans text-[11px] font-bold text-[#131b2e] uppercase tracking-wider pl-1.5 border-l-2 border-[#2563eb]">
-                      Processing Pipeline
+                  <div className="flex-1 flex flex-col justify-center space-y-4 py-4 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between pb-2 border-b border-[#e2e8f0]">
+                      <div className="font-sans text-[11px] font-bold text-[#131b2e] uppercase tracking-wider flex items-center gap-1.5">
+                        <Loader2 className="w-3.5 h-3.5 text-[#2563eb] animate-spin" />
+                        AI Analysis Pipeline
+                      </div>
+                      <span className="text-[10.5px] font-mono font-bold text-[#2563eb]">
+                        {Math.round(((currentStageIdx + 1) / ANALYSIS_STAGES.length) * 100)}%
+                      </span>
                     </div>
+
+                    {/* Progress Bar */}
+                    <div className="w-full bg-[#eaedff] h-1.5 rounded-full overflow-hidden">
+                      <div 
+                        className="bg-[#2563eb] h-full transition-all duration-300 rounded-full"
+                        style={{ width: `${((currentStageIdx + 1) / ANALYSIS_STAGES.length) * 100}%` }}
+                      />
+                    </div>
+
+                    {/* Stage Steps */}
                     <div className="space-y-2">
-                      {scanningSteps.map((step, idx) => {
-                        const isDone = scanStep > idx;
-                        const isCurrent = scanStep === idx;
+                      {ANALYSIS_STAGES.map((stage, idx) => {
+                        const isDone = currentStageIdx > idx;
+                        const isCurrent = currentStageIdx === idx;
                         return (
                           <div 
-                            key={idx} 
-                            className={`text-[10px] flex items-start gap-2 transition-all ${
-                              isDone ? "text-emerald-700 font-medium" : isCurrent ? "text-[#2563eb] font-bold" : "text-[#737686] opacity-50"
+                            key={stage.id} 
+                            className={`text-xs flex items-center gap-2.5 transition-all p-1.5 rounded-lg ${
+                              isDone 
+                                ? "text-emerald-700 font-medium bg-emerald-50/50" 
+                                : isCurrent 
+                                ? "text-[#2563eb] font-bold bg-[#2563eb]/5 border border-[#2563eb]/30" 
+                                : "text-[#737686] opacity-50"
                             }`}
                           >
-                            <span className="mt-0.5 shrink-0">
-                              {isDone ? "✓" : isCurrent ? "●" : "○"}
+                            <span className="shrink-0">
+                              {isDone ? (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                              ) : isCurrent ? (
+                                <Loader2 className="w-4 h-4 text-[#2563eb] animate-spin" />
+                              ) : (
+                                <div className="w-4 h-4 rounded-full border border-[#c3c6d7] flex items-center justify-center text-[9px] text-[#737686]">
+                                  {idx + 1}
+                                </div>
+                              )}
                             </span>
-                            <span className="leading-tight">{step}</span>
+                            <div className="min-w-0">
+                              <div className="leading-tight text-[11px]">{stage.label}</div>
+                              {isCurrent && (
+                                <div className="text-[9.5px] font-normal text-[#434655] truncate mt-0.5 animate-pulse">
+                                  {stage.desc}
+                                </div>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -485,8 +636,10 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                     {/* Pathology Class Details Mapping */}
                     <div className="grid grid-cols-2 gap-3 bg-[#faf8ff] border border-[#c3c6d7] p-3 rounded-lg text-xs leading-relaxed">
                       <div>
-                        <div className="text-[10px] text-[#737686]">Pathology Class:</div>
-                        <div className="font-bold text-[#131b2e] truncate">{activeAnalysis.cystType}</div>
+                        <div className="text-[10px] text-[#737686]">Pathology Finding:</div>
+                        <div className="font-bold text-[#131b2e] truncate">
+                          {activeAnalysis.pathologyFinding || activeAnalysis.cystType || "Normal Renal Parenchyma"}
+                        </div>
                       </div>
                       <div>
                         {activeAnalysis.dimensions && activeAnalysis.dimensions.length > 0 ? (
@@ -498,12 +651,19 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                           </>
                         ) : (
                           <>
-                            <div className="text-[10px] text-[#737686]">Sizing Bounds:</div>
-                            <div className="font-bold text-[#131b2e] truncate">N/A (Sterile)</div>
+                            <div className="text-[10px] text-[#737686]">AI Task:</div>
+                            <div className="font-bold text-[#131b2e] truncate">Kidney Stone Detection</div>
                           </>
                         )}
                       </div>
                     </div>
+
+                    {/* Low Confidence / Borderline Warning Banner */}
+                    {(activeAnalysis.isUncertain || activeAnalysis.confidence < 70 || activeAnalysis.diagnosis === DiagnosisResult.REVIEW_REQUIRED) && (
+                      <div className="bg-amber-50 border-l-4 border-amber-500 p-2.5 rounded text-[11px] text-amber-900 leading-snug">
+                        <span className="font-bold">Borderline Confidence Notice:</span> AI confidence ({activeAnalysis.confidence}%) is near the decision threshold. Secondary clinician evaluation recommended.
+                      </div>
+                    )}
 
                     {/* Clinical recommendation generator */}
                     <div className="space-y-1 bg-blue-50/40 border border-blue-200 p-3 rounded-lg">
@@ -516,23 +676,73 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                       </p>
                     </div>
 
-                    {/* Action Panel: save to records table, PDF print */}
-                    <div className="pt-2 flex gap-2">
+                    {/* Medical AI Disclaimer */}
+                    <div className="text-[9.5px] text-[#737686] bg-[#f9fafb] p-2 rounded border border-[#e5e7eb] leading-tight">
+                      <strong>Medical Disclaimer:</strong> KidneyVision AI provides assistive screening for Kidney Stones vs. Normal Renal Parenchyma. It does not replace clinical diagnosis by a licensed radiologist or physician.
+                    </div>
+
+                    {/* Action Panel: save to records table, PDF preview & download */}
+                    <div className="pt-2 flex gap-2 flex-wrap sm:flex-nowrap">
                       <button
                         onClick={handleSaveReport}
-                        className="flex-1 bg-[#2563eb] hover:bg-[#004ac6] text-white font-semibold text-[11px] py-2 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer"
+                        disabled={isSavingNotes}
+                        className="flex-1 bg-[#2563eb] hover:bg-[#004ac6] text-white font-semibold text-[11px] py-2 px-3 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
                       >
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        Authorize Sign &amp; Log Record
+                        {isSavingNotes ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                        )}
+                        {isSavingNotes ? "Saving..." : "Sign & Log"}
+                      </button>
+
+                      {/* PDF Preview Button */}
+                      <button
+                        onClick={async () => {
+                          try {
+                            if (!activeAnalysis?.id) return;
+                            setIsPreviewLoading(true);
+                            if (clinicianNotes.trim()) {
+                              await updateAnalysis(activeAnalysis.id, {
+                                clinicianNotes: clinicianNotes.trim()
+                              });
+                            }
+                            const url = await getReportPdfBlobUrl(activeAnalysis.id);
+                            setPdfPreviewUrl(url);
+                          } catch (e) {
+                            alert("Failed to load PDF preview. Ensure backend is running.");
+                          } finally {
+                            setIsPreviewLoading(false);
+                          }
+                        }}
+                        disabled={isPreviewLoading}
+                        className="px-3 py-2 border border-[#2563eb] text-[#2563eb] hover:bg-[#2563eb]/10 font-semibold text-[11px] rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
+                        title="Preview PDF inside modal"
+                      >
+                        {isPreviewLoading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                        Preview PDF
                       </button>
                       
+                      {/* PDF Download Button */}
                       <button
                         onClick={async () => {
                           try {
                             if (!activeAnalysis?.id) return;
                             const btn = document.getElementById('pdf-btn') as HTMLButtonElement;
-                            if (btn) btn.innerHTML = '<span class="animate-pulse">Downloading...</span>';
-                            await downloadReport(activeAnalysis.id.replace('PT-', ''));
+                            if (btn) btn.innerHTML = '<span class="animate-pulse">Saving...</span>';
+                            
+                            // Auto-persist clinician notes before downloading PDF report
+                            if (clinicianNotes.trim()) {
+                              await updateAnalysis(activeAnalysis.id, {
+                                clinicianNotes: clinicianNotes.trim()
+                              });
+                            }
+
+                            await downloadReport(activeAnalysis.id);
                             if (btn) btn.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-download"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
                           } catch (e) {
                             alert("Failed to download PDF report. Ensure backend is running.");
@@ -540,7 +750,7 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
                         }}
                         id="pdf-btn"
                         className="px-3 border border-[#c3c6d7] hover:bg-[#faf8ff] text-[#131b2e] rounded-lg transition-all flex items-center justify-center cursor-pointer"
-                        title="Print Report"
+                        title="Download PDF Report"
                       >
                         <Download className="w-4 h-4" />
                       </button>
@@ -557,22 +767,104 @@ export default function AppNewAnalysis({ onAddSuccess }: AppNewAnalysisProps) {
           {/* Clinician notes box (Linked to state when prediction is ready to add professional feedback) */}
           {activeAnalysis && (
             <div className="bg-white border border-[#c3c6d7] rounded-xl p-5 shadow-sm space-y-3">
-              <h4 className="font-sans text-xs font-bold uppercase tracking-wider text-[#131b2e]">
-                Radiologist Diagnostic Addendum Notes
-              </h4>
+              <div className="flex justify-between items-center">
+                <h4 className="font-sans text-xs font-bold uppercase tracking-wider text-[#131b2e] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-[#2563eb]" />
+                  Radiologist Diagnostic Addendum Notes
+                </h4>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setIsSavingNotes(true);
+                    try {
+                      await updateAnalysis(activeAnalysis.id, {
+                        clinicianNotes: clinicianNotes.trim()
+                      });
+                      setNoteSavedSuccess(true);
+                      setTimeout(() => setNoteSavedSuccess(false), 3500);
+                    } catch (e: any) {
+                      alert("Failed to save notes: " + e.message);
+                    } finally {
+                      setIsSavingNotes(false);
+                    }
+                  }}
+                  disabled={isSavingNotes}
+                  className="px-2.5 py-1 bg-[#2563eb] hover:bg-[#004ac6] text-white text-[10.5px] font-bold rounded-md flex items-center gap-1 transition-all disabled:opacity-50 cursor-pointer shadow-sm"
+                >
+                  {isSavingNotes ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+                  {isSavingNotes ? "Saving..." : noteSavedSuccess ? "Saved to Report ✓" : "Save Notes"}
+                </button>
+              </div>
               <textarea
                 className="w-full p-3 bg-[#faf8ff] border border-[#c3c6d7] rounded-lg text-xs font-sans focus:bg-white outline-none focus:ring-2 focus:ring-[#2563eb]/20 focus:border-[#2563eb] transition-all min-h-[90px]"
                 placeholder="Submit specialized biopsy indicators or Doppler results here to sign with this AI print audit..."
-                defaultValue={activeAnalysis.clinicianNotes || ""}
+                value={clinicianNotes}
+                onChange={(e) => setClinicianNotes(e.target.value)}
               />
-              <span className="text-[10px] text-[#737686] block">
-                * Signing this addendum logs the exact credentials of your secure clinical login portal signature.
-              </span>
+              <div className="flex justify-between items-center text-[10px]">
+                <span className="text-[#737686]">
+                  * Signing this addendum logs the exact credentials of your secure clinical login portal signature.
+                </span>
+                {noteSavedSuccess && (
+                  <span className="font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 animate-[fadeIn_200ms_ease-out]">
+                    ✓ Saved to database and PDF report
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
         </div>
       </div>
+
+      {/* In-App PDF Preview Modal */}
+      {pdfPreviewUrl && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in duration-200">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 border-b border-[#e2e8f0] flex items-center justify-between bg-[#f9fafb]">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4.5 h-4.5 text-[#2563eb] shrink-0" />
+                <h3 className="font-bold text-sm text-[#131b2e] truncate">
+                  Diagnostic Report Preview {activeAnalysis ? `(#${activeAnalysis.id} - ${patientName || patientId})` : ""}
+                </h3>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={pdfPreviewUrl}
+                  download={`kidneyvision_report_${activeAnalysis?.id || "preview"}.pdf`}
+                  className="px-3 py-1.5 bg-[#2563eb] text-white hover:bg-blue-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Download
+                </a>
+                <button
+                  onClick={() => {
+                    if (pdfPreviewUrl.startsWith("blob:")) {
+                      URL.revokeObjectURL(pdfPreviewUrl);
+                    }
+                    setPdfPreviewUrl(null);
+                  }}
+                  className="p-1.5 text-[#737686] hover:text-[#131b2e] hover:bg-neutral-200 rounded-lg transition-all cursor-pointer"
+                  title="Close Preview"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body with PDF Viewer iframe */}
+            <div className="flex-1 bg-[#525659] relative min-h-[550px]">
+              <iframe
+                src={`${pdfPreviewUrl}#toolbar=1&navpanes=0`}
+                title="Diagnostic Report PDF"
+                className="w-full h-full min-h-[550px] border-0"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

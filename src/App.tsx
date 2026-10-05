@@ -12,6 +12,7 @@ import ProtectedRoute from "./components/auth/ProtectedRoute";
 
 import React, { Suspense } from "react";
 import LoadingSkeleton from "./components/common/LoadingSkeleton";
+import ErrorBoundary from "./components/common/ErrorBoundary";
 
 const AppDashboard = React.lazy(() => import("./components/AppDashboard"));
 const AppNewAnalysis = React.lazy(() => import("./components/AppNewAnalysis"));
@@ -21,6 +22,8 @@ const AppSettings = React.lazy(() => import("./components/AppSettings"));
 const GuestAnalysis = React.lazy(() => import("./components/GuestAnalysis"));
 const ForgotPassword = React.lazy(() => import("./components/ForgotPassword"));
 const ResetPassword = React.lazy(() => import("./components/ResetPassword"));
+const PrivacyPage = React.lazy(() => import("./components/PrivacyPage"));
+const TermsPage = React.lazy(() => import("./components/TermsPage"));
 
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
@@ -163,16 +166,18 @@ function PortalLayout() {
       </aside>
 
       <main className="flex-1 p-6 md:p-10 lg:p-12 overflow-y-auto max-w-7xl mx-auto w-full">
-        <Suspense fallback={<LoadingSkeleton />}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<AppDashboard />} />
-            <Route path="/analysis" element={<AppNewAnalysis onAddSuccess={() => window.location.href = "/history"} />} />
-            <Route path="/history" element={<AppHistory />} />
-            <Route path="/reports" element={<AppReports />} />
-            <Route path="/settings" element={<AppSettings />} />
-          </Routes>
-        </Suspense>
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingSkeleton />}>
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<AppDashboard />} />
+              <Route path="/analysis" element={<AppNewAnalysis onAddSuccess={() => window.location.href = "/history"} />} />
+              <Route path="/history" element={<AppHistory />} />
+              <Route path="/reports" element={<AppReports />} />
+              <Route path="/settings" element={<AppSettings />} />
+            </Routes>
+          </Suspense>
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -184,12 +189,14 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           {/* Public Routes */}
-          <Route path="/" element={<LandingPage onNavigateToAuth={() => window.location.href = "/login"} onEnterPortalDirectly={() => window.location.href = "/guest"} />} />
+          <Route path="/" element={<LandingPage onNavigateToAuth={() => window.location.href = "/login"} onEnterPortalDirectly={() => window.location.href = "/guest"} onNavigateToInfo={(page) => window.location.href = `/${page}`} />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/forgot-password" element={<Suspense fallback={<LoadingSkeleton />}><ForgotPassword /></Suspense>} />
           <Route path="/reset-password" element={<Suspense fallback={<LoadingSkeleton />}><ResetPassword /></Suspense>} />
           <Route path="/guest" element={<GuestAnalysis />} />
+          <Route path="/privacy" element={<Suspense fallback={<LoadingSkeleton />}><PrivacyPage /></Suspense>} />
+          <Route path="/terms" element={<Suspense fallback={<LoadingSkeleton />}><TermsPage /></Suspense>} />
 
           {/* Protected Routes rendered inside PortalLayout */}
           <Route 
